@@ -28,7 +28,7 @@
 
 .PHONY: clean all 
 
-all: clean check T01 T02 T03 T04 T05 T06 T07 T08 T09 T10 T11 T12 T13  
+all: clean check T01 T02 T03 T04 T05 T06 T07 T08 T09 T10 T11 T12  
 
 T01:
 	@cd 01_HelloWorld && make FLASCC="$(FLASCC)" FLEX="$(FLEX)"
@@ -54,8 +54,6 @@ T11:
 	@cd 11_OpenMP && make FLASCC="$(FLASCC)" FLEX="$(FLEX)"
 T12:
 	@cd 12_Stage3D && make FLASCC="$(FLASCC)" FLEX="$(FLEX)"
-T13:
-	@cd 13_GLSDL && make FLASCC="$(FLASCC)" FLEX="$(FLEX)"
 
 include Makefile.common
 
@@ -72,4 +70,3 @@ clean:
 	@cd 10_MessageChannel && make clean
 	@cd 11_OpenMP && make clean
 	@cd 12_Stage3D && make clean
-	@cd 13_GLSDL && make clean
