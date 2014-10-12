@@ -1,0 +1,925 @@
+diff -rupN avmplus-master.orig/AVMPI/MMgcPortUnix.cpp avmplus-master/AVMPI/MMgcPortUnix.cpp
+--- avmplus-master.orig/AVMPI/MMgcPortUnix.cpp	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/AVMPI/MMgcPortUnix.cpp	2014-10-11 22:09:36.000000000 +0400
+@@ -50,9 +50,16 @@
+ #define HAVE_BACKTRACE
+ #endif
+ 
++#ifdef __CYGWIN__
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#endif
+ 
+ bool AVMPI_canMergeContiguousRegions()
+ {
++#ifdef __CYGWIN__
++    return false;
++#endif
+     return true;
+ }
+ 
+@@ -71,14 +78,26 @@ bool AVMPI_useVirtualMemory()
+ 
+ bool AVMPI_areNewPagesDirty()
+ {
++#ifdef __CYGWIN__
++    return true;
++#endif
+     return false;
+ }
+ 
+ void* AVMPI_reserveMemoryRegion(void* address, size_t size)
+ {
++    // Cygwin does not allow re-mmaping memory that is already mapped,
++    // so map this memory as read/write initially so that there is no
++    // need to remap it later.
++    #ifdef __CYGWIN__
++    int prot = PROT_READ | PROT_WRITE;
++    #else
++    int prot = PROT_NONE;
++    #endif
++
+     char *addr = (char*)mmap((maddr_ptr)address,
+                              size,
+-                             PROT_NONE,
++                             prot,
+                              MAP_PRIVATE | MAP_ANONYMOUS,
+                              -1, 0);
+     if (addr == MAP_FAILED) {
+@@ -100,12 +119,16 @@ bool AVMPI_releaseMemoryRegion(void* add
+ 
+ bool AVMPI_commitMemory(void* address, size_t size)
+ {
++    #ifdef __CYGWIN__
++    // We've already mapped this memory RW to help Cygwin
++    char *addr = (char *) address;
++    #else
+     char *addr = (char*)mmap((maddr_ptr)address,
+                              size,
+                              PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS,
+                              -1, 0);
+-
++    #endif
+     size_t pageSize = VMPI_getVMPageSize();
+     char* temp_addr = addr;
+     while( temp_addr < (addr+size))
+@@ -125,12 +148,19 @@ bool AVMPI_decommitMemory(char *address,
+     // could reserve it after we munmap it and even worse if that happened the mmap call would
+     // still work causing both mmap callers to think they mapped the memory.  Mac does have
+     // to release first but it can tell that the following reserve succeeded or not.
++    #ifdef __CYGWIN__
++    // Cygwin does not support remapping memory.
++    (void) size;
++    (void) address;
++    return true;
++    #else
+     char *addr = (char*)mmap((maddr_ptr)address,
+                              size,
+                              PROT_NONE,
+                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+                              -1, 0);
+     return addr == address;
++    #endif
+ }
+ 
+ void* AVMPI_allocateAlignedMemory(size_t size)
+@@ -294,7 +324,23 @@ size_t AVMPI_getPrivateResidentPageCount
+ 
+ #endif
+ 
+-#ifdef SOLARIS
++#if defined __CYGWIN__
++
++size_t VMPI_threadAttrDefaultStackSize()
++{
++    MEMORY_BASIC_INFORMATION __mib;
++    VirtualQuery(&__mib, &__mib, sizeof(MEMORY_BASIC_INFORMATION));
++    return (uintptr_t)__mib.BaseAddress + __mib.RegionSize - (uintptr_t)__mib.AllocationBase;
++}
++
++uintptr_t AVMPI_getThreadStackBase()
++{
++    MEMORY_BASIC_INFORMATION __mib;
++    VirtualQuery(&__mib, &__mib, sizeof(MEMORY_BASIC_INFORMATION));
++    return (uintptr_t)__mib.BaseAddress + __mib.RegionSize;
++}
++
++#elif defined SOLARIS
+ 
+ pthread_key_t stackTopKey = NULL;
+ 
+@@ -387,7 +433,6 @@ uintptr_t AVMPI_getThreadStackBase()
+     GCAssert(stackTop > &sz);
+     pthread_setspecific(stackTopKey, stackTop);
+     return (uintptr_t)stackTop;
+-
+ #endif
+ }
+ 
+diff -rupN avmplus-master.orig/VMPI/ThreadsPosix.cpp avmplus-master/VMPI/ThreadsPosix.cpp
+--- avmplus-master.orig/VMPI/ThreadsPosix.cpp	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/VMPI/ThreadsPosix.cpp	2014-10-11 22:09:36.000000000 +0400
+@@ -109,7 +109,14 @@ bool VMPI_threadAttrDestroy(vmpi_thread_
+ 
+ bool VMPI_threadAttrSetGuardSize(vmpi_thread_attr_t* attr, size_t size)
+ {
++    #ifdef __CYGWIN__
++        fprintf(stderr, "unimplmented: VMPI_threadAttrSetGuardSize\n");
++        abort();
++        (void) attr;
++        (void) size;
++    #else
+     return pthread_attr_setguardsize(attr, size) == 0;
++    #endif
+ }
+ 
+ bool VMPI_threadAttrSetStackSize(vmpi_thread_attr_t* attr, size_t size)
+@@ -137,13 +144,20 @@ void VMPI_threadAttrSetPriorityHigh(vmpi
+ 
+ size_t VMPI_threadAttrDefaultGuardSize()
+ {
++    #ifdef __CYGWIN__
++        fprintf(stderr, "unimplemented: VMPI_threadAttrDefaultGuardSize\n");
++        abort();
++    #else
+     pthread_attr_t attr;
+     size_t size;
+     pthread_attr_init(&attr);
+     pthread_attr_getguardsize(&attr, &size);
+     return size;
++    #endif
+ }
+ 
++#ifndef __CYGWIN__
++// in MMgcPortUnix.cpp for Cygwin
+ size_t VMPI_threadAttrDefaultStackSize()
+ {
+     pthread_attr_t attr;
+@@ -152,3 +166,4 @@ size_t VMPI_threadAttrDefaultStackSize()
+     pthread_attr_getstacksize(&attr, &size);
+     return size;
+ }
++#endif
+diff -rupN avmplus-master.orig/build/avmfeatures.py avmplus-master/build/avmfeatures.py
+--- avmplus-master.orig/build/avmfeatures.py	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/build/avmfeatures.py	2014-10-11 22:09:36.000000000 +0400
+@@ -49,6 +49,11 @@ def featureSettings(o):
+         args += "-DAVMFEATURE_FLOAT=1 "
+     if (arg == False):
+         args += "-DAVMFEATURE_FLOAT=0 "
++    arg = o.getBoolArg("alchemy-posix")
++    if (arg == True):
++        args += "-DAVMFEATURE_ALCHEMY_POSIX=1 "
++    if (arg == False):
++        args += "-DAVMFEATURE_ALCHEMY_POSIX=0 "
+     arg = o.getBoolArg("osr")
+     if (arg == True):
+         args += "-DAVMFEATURE_OSR=1 "
+@@ -230,7 +235,12 @@ def builtinBuildFlags(o):
+     buildFlags = ""
+     arg = o.getBoolArg("float", False, False)
+     if (arg == True):
+-        buildFlags += "-config CONFIG::VMCFG_FLOAT=true -abcfuture"
++        buildFlags += " -config CONFIG::VMCFG_FLOAT=true -abcfuture "
++    if (arg == False):
++        buildFlags += " -config CONFIG::VMCFG_FLOAT=false "
++    arg = o.getBoolArg("alchemy-posix", False, False)
++    if (arg == True):
++        buildFlags += " -config CONFIG::VMCFG_ALCHEMY_POSIX=true "
+     if (arg == False):
+-        buildFlags += "-config CONFIG::VMCFG_FLOAT=false"
++        buildFlags += " -config CONFIG::VMCFG_ALCHEMY_POSIX=false "
+     return buildFlags
+diff -rupN avmplus-master.orig/build/configuration.py avmplus-master/build/configuration.py
+--- avmplus-master.orig/build/configuration.py	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/build/configuration.py	2014-10-11 22:09:36.000000000 +0400
+@@ -53,7 +53,7 @@ def _configSub(ostest, cputest, options)
+     if re.search(r'^i(\d86|86pc|x86)$', cputest):
+         cpu = 'i686'
+     elif re.search('^(x86_64|amd64)$', cputest):
+-        cpu = 'x86_64'
++        cpu = 'i686' # force 32bit builds for now
+     elif re.search('^(ppc64|powerpc64)$', cputest):
+         cpu = 'ppc64'
+     elif re.search('^(ppc|powerpc|Power Macintosh)$', cputest):
+@@ -213,6 +213,8 @@ class Configuration:
+         # Hackery! Make assumptions that we want to build with GCC 3.3 on MacPPC
+         # and GCC4 on MacIntel
+         elif self._target[0] == 'darwin':
++            if options.getBoolArg("clang", False):
++                self._compiler = 'clang'
+             self._acvars.update({
+                 'DLL_SUFFIX'   : 'dylib',
+                 'CPPFLAGS'     : '-pipe',
+@@ -231,6 +233,9 @@ class Configuration:
+ 
+             if 'CXX' in os.environ:
+                 self._acvars['CXX'] = os.environ['CXX']
++                self._acvars['CXXFLAGS'] += os.environ.get('CXXFLAGS', '')
++                self._acvars['CFLAGS'] += os.environ.get('CFLAGS', '')
++                self._acvars['LDFLAGS'] += os.environ.get('LDFLAGS', '')
+             elif self._target[1] == 'i686':
+                 self._acvars['CXX'] = 'g++'
+                 self._acvars['CXXFLAGS'] += ' -arch i686 '
+diff -rupN avmplus-master.orig/configure.py avmplus-master/configure.py
+--- avmplus-master.orig/configure.py	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/configure.py	2014-10-11 22:09:36.000000000 +0400
+@@ -69,6 +69,18 @@ def _setSDKParams(sdk_version, os_ver, x
+         os_ver,sdk_number = '10.7','10.7'
+         if xcode_version is None:
+             xcode_version = '4'
++    elif sdk_version == '108':
++        os_ver,sdk_number = '10.8','10.8'
++        if xcode_version is None:
++            xcode_version = '5'
++    elif sdk_version == '109':
++        os_ver,sdk_number = '10.9','10.9'
++        if xcode_version is None:
++            xcode_version = '5'
++    elif sdk_version == '110':
++        os_ver,sdk_number = '11.0','11.0'
++        if xcode_version is None:
++            xcode_version = '6'
+     else:
+         print'Unknown SDK version -> %s. Expected values are 104u, 105, 106 or 107.' % sdk_version
+         sys.exit(2)
+@@ -398,6 +410,27 @@ elif config.getCompiler() == 'SunStudio'
+     APP_CXXFLAGS = "-template=no%extdef -erroff"
+     OPT_CXXFLAGS = "-xO2 "
+     DEBUG_CXXFLAGS += "-g "
++elif config.getCompiler() == 'clang':
++    APP_CXXFLAGS += "-Wall -Wcast-align -Wdisabled-optimization -Wextra -Wformat=2 -Winit-self -Winvalid-pch -Wno-invalid-offsetof -Wno-switch "\
++                       "-Wparentheses -Wpointer-arith -Wreorder -Wsign-compare -Wunused-parameter -Wwrite-strings -Wno-ctor-dtor-privacy -Woverloaded-virtual "\
++                       "-Wsign-promo -Wno-char-subscripts -fmessage-length=0 -fno-exceptions -fno-rtti -fstrict-aliasing -fsigned-char  "
++   
++    FLOAT_ABI = None;
++    EXTRA_CFLAGS = "";
++    if EXTRA_CFLAGS != None:
++        APP_CXXFLAGS += EXTRA_CFLAGS
++        APP_CFLAGS += EXTRA_CFLAGS
++    if FLOAT_ABI != None:
++        APP_CXXFLAGS += FLOAT_ABI
++        APP_CFLAGS += FLOAT_ABI
++        AVMSHELL_LDFLAGS += FLOAT_ABI
++
++    if config.getDebug():
++        APP_CXXFLAGS += ""
++    else:
++        APP_CXXFLAGS += "-Wuninitialized "
++    DEBUG_CXXFLAGS += "-g "
++    DEBUG_LDFLAGS += "-g "
+ else:
+     raise Exception('Unrecognized compiler: ' + config.getCompiler())
+ 
+@@ -433,7 +466,9 @@ if the_os == "darwin":
+                          '_MAC': None,
+                          'AVMPLUS_MAC': None,
+                          'TARGET_RT_MAC_MACHO': 1})
+-    APP_CXXFLAGS += "-fpascal-strings -faltivec -fasm-blocks "
++    APP_CXXFLAGS += "-fpascal-strings -fasm-blocks "
++    if config.getCompiler() != 'clang':
++        APP_CXXFLAGS += "-faltivec "
+ 
+     # If an sdk is selected align OS and gcc/g++ versions to it
+     os_ver,sdk_path = _setSDKParams(o.mac_sdk, os_ver, o.mac_xcode)
+diff -rupN avmplus-master.orig/core/avmfeatures.as avmplus-master/core/avmfeatures.as
+--- avmplus-master.orig/core/avmfeatures.as	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/core/avmfeatures.as	2014-10-11 22:09:36.000000000 +0400
+@@ -474,6 +474,16 @@ var FEATURES =
+     <build-flags type="onoff"> -abcfuture </build-flags>
+     <precludes> AVMFEATURE_AOT </precludes> <!-- AOT + float doesn't work yet, byt that will change eventually -->
+   </feature>
++  
++  <!-- CROSSBRIDGRE PATCH START -->
++  <feature>
++    <desc> Enables the POSIX builtins used by commandline Alchemy apps. </desc>
++    <name> AVMFEATURE_ALCHEMY_POSIX </name>
++    <defines> VMCFG_ALCHEMY_POSIX  </defines>
++    <build-flags type="boolean"> -config CONFIG::VMCFG_ALCHEMY_POSIX </build-flags>
++    <build-flags type="onoff"> </build-flags>
++  </feature>
++  <!-- CROSSBRIDGRE PATCH END -->
+ 
+   <feature>
+     <desc> Enables delayed JIT-compilation with on-stack replacement, by default,
+diff -rupN avmplus-master.orig/core/avmfeatures.cpp avmplus-master/core/avmfeatures.cpp
+--- avmplus-master.orig/core/avmfeatures.cpp	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/core/avmfeatures.cpp	2014-10-11 22:09:36.000000000 +0400
+@@ -95,6 +95,11 @@ const char * const avmfeatures = ""
+   #if AVMFEATURE_FLOAT
+     "AVMFEATURE_FLOAT;"
+   #endif
++  // CROSSBRIDGE PATCH START
++  #if AVMFEATURE_ALCHEMY_POSIX
++    "AVMFEATURE_ALCHEMY_POSIX;"
++  #endif
++  // CROSSBRIDGE PATCH END
+   #if AVMFEATURE_OSR
+     "AVMFEATURE_OSR;"
+   #endif
+diff -rupN avmplus-master.orig/core/avmfeatures.h avmplus-master/core/avmfeatures.h
+--- avmplus-master.orig/core/avmfeatures.h	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/core/avmfeatures.h	2014-10-11 22:09:36.000000000 +0400
+@@ -57,6 +57,9 @@
+ #undef VMCFG_HALFMOON
+ #undef VMCFG_FLOAT
+ #undef VMCFG_GENERIC_FLOAT4
++// CROSSBRIDGE PATCH START
++#undef VMCFG_ALCHEMY_POSIX
++// CROSSBRIDGE PATCH END
+ #undef VMCFG_OSR
+ #undef VMCFG_COMPILEPOLICY
+ #undef VMCFG_AOT
+@@ -428,6 +431,15 @@
+ #  error "AVMFEATURE_FLOAT must be defined and 0 or 1 (only)."
+ #endif
+ 
++// CROSSBRIDGE PATCH START
++/* AVMFEATURE_ALCHEMY_POSIX
++ *
++ * Enables the POSIX builtins used by commandline Alchemy apps.
++ */
++#if !defined AVMFEATURE_ALCHEMY_POSIX || AVMFEATURE_ALCHEMY_POSIX != 0 && AVMFEATURE_ALCHEMY_POSIX != 1
++#  error "AVMFEATURE_ALCHEMY_POSIX must be defined and 0 or 1 (only)."
++#endif
++// CROSSBRIDGE PATCH END
+ 
+ /* AVMFEATURE_OSR
+  *
+@@ -1226,6 +1238,11 @@
+ #if AVMFEATURE_FLOAT
+ #  define VMCFG_FLOAT
+ #endif
++// CROSSBRIDGE PATCH START
++#if AVMFEATURE_ALCHEMY_POSIX
++#  define VMCFG_ALCHEMY_POSIX
++#endif
++// CROSSBRIDGE PATCH END
+ #if AVMFEATURE_FLOAT
+ #  define VMCFG_GENERIC_FLOAT4
+ #endif
+diff -rupN avmplus-master.orig/nanojit/LIR.h avmplus-master/nanojit/LIR.h
+--- avmplus-master.orig/nanojit/LIR.h	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/nanojit/LIR.h	2014-10-11 22:09:36.000000000 +0400
+@@ -7,6 +7,10 @@
+ #ifndef __nanojit_LIR__
+ #define __nanojit_LIR__
+ 
++#ifdef NL1
++ #undef NL1 // BSD hack
++#endif 
++
+ namespace nanojit
+ {
+     enum LOpcode
+diff -rupN avmplus-master.orig/shell/ShellCore.cpp avmplus-master/shell/ShellCore.cpp
+--- avmplus-master.orig/shell/ShellCore.cpp	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/shell/ShellCore.cpp	2014-10-11 22:09:36.000000000 +0400
+@@ -300,43 +300,57 @@ namespace avmshell
+ #endif // VMCFG_EVAL
+ 
+ #ifdef AVMSHELL_PROJECTOR_SUPPORT
++    
++    const int projectorHeaderLength = 12;
+ 
+     // Run a known projector file
+-    int ShellCore::executeProjector(char *executablePath)
++    int ShellCore::executeProjector(ShellSettings &settings)
+     {
+-        AvmAssert(isValidProjectorFile(executablePath));
++        AvmAssert(isValidProjectorFile(settings.programFilename));
+ 
+-        uint8_t header[8];
++        FileInputStream file(settings.programFilename);
+ 
+-        FileInputStream file(executablePath);
++        avmplus::ScriptBuffer code = newScriptBuffer(settings.projectorContentLength);
++        settings.projectorScriptBuffer = &code;
++        file.seek(file.length() - projectorHeaderLength - settings.projectorArgsLength - settings.projectorContentLength);
++        file.read(code.getBuffer(), settings.projectorContentLength);
++
++        if(settings.projectorArgsLength) {
++            char *vmargstr = mmfx_new_array(char, settings.projectorArgsLength);
++            file.seek(file.length() - projectorHeaderLength - settings.projectorArgsLength);
++            file.read(vmargstr, settings.projectorArgsLength);
++
++            int vmargc = 0;
++            for(int i=0; i<settings.projectorArgsLength; i++)
++                if(vmargstr[i] == 0x0)
++                    vmargc++;
++
++            char **vmargv = mmfx_new_array(char*, vmargc);
++            AvmAssert(vmargc > 0);
++            int cur = 0;
++            vmargv[cur++] = &vmargstr[0];
++
++            for(int i=1; i<settings.projectorArgsLength; i++)
++                if(vmargstr[i-1] == 0x0)
++                    vmargv[cur++] = &vmargstr[i];
+ 
+-        file.seek(file.length() - 8);
+-        file.read(header, 8);
+-
+-        int abcLength = (header[4]     |
+-                         header[5]<<8  |
+-                         header[6]<<16 |
+-                         header[7]<<24);
+-
+-        avmplus::ScriptBuffer code = newScriptBuffer(abcLength);
+-        file.seek(file.length() - 8 - abcLength);
+-        file.read(code.getBuffer(), abcLength);
++            Shell::parseCommandLine(vmargc, vmargv, settings);
++        }
+ 
+-        ShellCoreSettings settings;
+-        return handleArbitraryExecutableContent(settings.do_testSWFHasAS3, code, executablePath);
++    return handleArbitraryExecutableContent(settings.do_testSWFHasAS3, code, settings.programFilename);
+     }
+ 
+     /* static */
+-    bool ShellCore::isValidProjectorFile(const char* filename)
++    bool ShellCore::isValidProjectorFile(const char *filename)
+     {
+         FileInputStream file(filename);
+-        uint8_t header[8];
++        uint8_t header[projectorHeaderLength];
+ 
+         if (!file.valid())
+             return false;
+ 
+-        file.seek(file.length() - 8);
+-        file.read(header, 8);
++        file.seek(file.length() - projectorHeaderLength);
++        file.read(header, projectorHeaderLength);
+ 
+         // Check the magic number
+         if (header[0] != 0x56 || header[1] != 0x34 || header[2] != 0x12 || header[3] != 0xFA)
+@@ -344,6 +358,44 @@ namespace avmshell
+ 
+         return true;
+     }
++    
++    /* static */
++    void ShellCore::gatherProjectorSettings(ShellSettings &settings)
++    {
++        settings.do_projector = false;
++        settings.projectorHasArgs = false;
++        settings.projectorContentLength = 0;
++        settings.projectorArgsLength = 0;
++
++        FileInputStream file(settings.programFilename);
++        uint8_t header[projectorHeaderLength];
++
++        if (!file.valid())
++            return;
++
++        file.seek(file.length() - projectorHeaderLength);
++        file.read(header, projectorHeaderLength);
++
++        // Check the magic number
++        if (header[0] != 0x56 || header[1] != 0x34 || header[2] != 0x12 || header[3] != 0xFA) {
++            settings.do_projector = false;
++            return;
++        }
++
++        settings.do_projector = true;
++        settings.projectorContentLength = (header[4] | header[5]<<8 | header[6]<<16 | header[7]<<24);
++        settings.projectorArgsLength = (header[8] | header[9]<<8 | header[10]<<16 | header[11]<<24);
++
++        // INT_MAX is used as a sentinel value to indicate that the projector
++        // does not contain any arguments and that the projector should parse
++        // vm arguments from the commandline.
++        if(settings.projectorArgsLength == INT_MAX) {
++            settings.projectorArgsLength = 0;
++            settings.projectorHasArgs = false;
++        } else {
++            settings.projectorHasArgs = true;
++        }
++    }
+ 
+ #endif // AVMSHELL_PROJECTOR_SUPPORT
+ 
+@@ -625,7 +677,6 @@ namespace avmshell
+             END_CATCH
+             END_TRY
+ 
+-
+             return exitCode;
+         }
+         END_CATCH
+diff -rupN avmplus-master.orig/shell/ShellCore.h avmplus-master/shell/ShellCore.h
+--- avmplus-master.orig/shell/ShellCore.h	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/shell/ShellCore.h	2014-10-11 22:09:36.000000000 +0400
+@@ -147,7 +147,7 @@ namespace avmshell
+ #endif
+ 
+ #ifdef AVMSHELL_PROJECTOR_SUPPORT
+-        int executeProjector(char *executablePath);
++        int executeProjector(ShellSettings &settings);
+ #endif
+ 
+ #ifdef VMCFG_SELFTEST
+@@ -160,6 +160,7 @@ namespace avmshell
+ 
+ #ifdef AVMSHELL_PROJECTOR_SUPPORT
+         static bool isValidProjectorFile(const char* filename);
++        static void gatherProjectorSettings(ShellSettings &settings);
+ #endif
+ 
+         /*virtual*/ inline avmplus::ApiVersion getDefaultAPI() { return this->defaultAPIVersion; }
+diff -rupN avmplus-master.orig/shell/SystemClass.cpp avmplus-master/shell/SystemClass.cpp
+--- avmplus-master.orig/shell/SystemClass.cpp	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/shell/SystemClass.cpp	2014-10-11 22:09:36.000000000 +0400
+@@ -38,12 +38,16 @@ namespace avmshell
+ 
+     void SystemClass::exit(int status)
+     {
++    #if 1 // HACKERY
++        _exit(status);
++        #else
+         if (core()->getIsolate()->getAggregate()->isPrimordial(core()->getIsolate()->getDesc())) {
+             Platform::GetInstance()->exit(status);
+         } else {
+-            GCRef<avmplus::ClassClosure> workerClass = toplevel()->workerClass();
+-            static_cast<ShellWorkerClass*>((avmplus::ClassClosure*)workerClass)->getCurrentWorker()->terminate();
+-        }
++        GCRef<avmplus::ClassClosure> workerClass = toplevel()->workerClass();
++        static_cast<ShellWorkerClass*>((avmplus::ClassClosure*)workerClass)->getCurrentWorker()->terminate();
++    }
++     #endif
+     }
+ 
+     void SystemClass::sleep(int32_t ms)
+@@ -188,6 +192,27 @@ namespace avmshell
+         return array;
+     }
+ 
++    extern "C" char **environ;
++
++    avmplus::ArrayObject * SystemClass::getEnviron()
++    {
++        // get VTable for avmplus.System
++        avmplus::Toplevel *toplevel = this->toplevel();
++        avmplus::AvmCore *core = this->core();
++
++        avmplus::ArrayObject *array = toplevel->arrayClass()->newArray();
++	char **cur = environ;
++	int i = 0;
++	while(*cur)
++	{
++            array->setUintProperty(i, core->newStringUTF8(*cur)->atom());
++	    i++;
++	    cur++;
++	}
++
++        return array;
++    }
++
+     avmplus::Stringp SystemClass::readLine()
+     {
+         avmplus::AvmCore* core = this->core();
+diff -rupN avmplus-master.orig/shell/SystemClass.h avmplus-master/shell/SystemClass.h
+--- avmplus-master.orig/shell/SystemClass.h	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/shell/SystemClass.h	2014-10-11 22:09:36.000000000 +0400
+@@ -297,6 +297,7 @@ namespace avmshell
+         /*@}*/
+ 
+         avmplus::ArrayObject * getArgv();
++        avmplus::ArrayObject * getEnviron();
+ 
+         avmplus::Stringp readLine();
+ 
+diff -rupN avmplus-master.orig/shell/avmshell-features.h avmplus-master/shell/avmshell-features.h
+--- avmplus-master.orig/shell/avmshell-features.h	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/shell/avmshell-features.h	2014-10-11 22:09:36.000000000 +0400
+@@ -241,6 +241,12 @@
+   #define AVMFEATURE_FLOAT 0
+ #endif
+ 
++// CROSSBRIDGE PATCH START
++#ifndef AVMFEATURE_ALCHEMY_POSIX
++  #define AVMFEATURE_ALCHEMY_POSIX 0
++#endif
++// CROSSBRIDGE PATCH END
++
+ #ifndef AVMFEATURE_SWF17
+   #define AVMFEATURE_SWF17 1
+ #endif
+diff -rupN avmplus-master.orig/shell/avmshell.cpp avmplus-master/shell/avmshell.cpp
+--- avmplus-master.orig/shell/avmshell.cpp	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/shell/avmshell.cpp	2014-10-11 22:09:36.000000000 +0400
+@@ -104,7 +104,19 @@ namespace avmshell
+             }
+ 
+             avmplus::FixedHeapRef<Shell> instance(mmfx_new(Shell));
+-            instance->parseCommandLine(argc, argv);
++
++            instance->settings.programFilename = argv[0]; // How portable / reliable is this?
++#ifdef AVMSHELL_PROJECTOR_SUPPORT
++            ShellCore::gatherProjectorSettings(instance->settings);
++
++            if(instance->settings.projectorHasArgs && argc > 0) {
++                instance->settings.arguments = &argv[1];
++                instance->settings.numargs = argc-1;
++            }
++
++            if(!(instance->settings.do_projector && instance->settings.projectorHasArgs))
++#endif
++            instance->parseCommandLine(argc, argv, instance->settings);
+ 
+             if (instance->settings.do_log)
+               initializeLogging(instance->settings.numfiles > 0 ? instance->settings.filenames[0] : "AVMLOG");
+@@ -150,6 +162,16 @@ namespace avmshell
+ 		else 
+ 		{
+ 			Shell* shell = static_cast<Shell*> (getAggregate());
++			 #ifdef AVMSHELL_PROJECTOR_SUPPORT
++        if(shell->settings.do_projector)
++        {
++            m_code.allocate(1);
++            size_t size = shell->settings.projectorScriptBuffer->getSize();
++            m_code.values[0].allocate((int)size);
++            memcpy(m_code.values[0].values, shell->settings.projectorScriptBuffer->getBuffer(), size);
++            return;
++        }
++#endif
+ 			int numfiles = shell->settings.numfiles;
+ 			char** filenames = shell->settings.filenames;
+ 			
+@@ -297,8 +319,8 @@ namespace avmshell
+ #ifdef AVMSHELL_PROJECTOR_SUPPORT
+         if (settings.do_projector) {
+             AvmAssert(settings.programFilename != NULL);
+-            int exitCode = shell->executeProjector(settings.programFilename);
+-            if (exitCode != 0)
++            int exitCode = shell->executeProjector(settings);
++            // if (exitCode != 0) // HACKERY?!
+                 Platform::GetInstance()->exit(exitCode);
+         }
+ #endif
+@@ -780,13 +802,11 @@ namespace avmshell
+     }
+ 
+     /* static */
+-    void Shell::parseCommandLine(int argc, char* argv[])
++    void Shell::parseCommandLine(int argc, char* argv[], ShellSettings &settings)
+     {
+         bool print_version = false;
+ 
+         // options filenames -- args
+-
+-        settings.programFilename = argv[0];     // How portable / reliable is this?
+         for (int i=1; i < argc ; i++) {
+             const char * const arg = argv[i];
+             bool mmgcSaysArgIsWrong = false;
+@@ -981,7 +1001,6 @@ namespace avmshell
+                 else if (!VMPI_strcmp(arg, "-jitharden")) {
+                     settings.njconfig.harden_nop_insertion = true;
+                     settings.njconfig.harden_function_alignment = true;
+-                    settings.njconfig.harden_blind_constants = true;
+                 }
+                 else if (!VMPI_strcmp(arg, "-Ojit")) {
+                     settings.runmode = avmplus::RM_jit_all;
+@@ -1176,7 +1195,7 @@ namespace avmshell
+         // Vetting the options
+ 
+ #ifdef AVMSHELL_PROJECTOR_SUPPORT
+-        if (settings.programFilename != NULL && ShellCore::isValidProjectorFile(settings.programFilename)) {
++        if (settings.do_projector) {
+             if (settings.do_selftest || settings.do_repl || settings.numfiles > 0) {
+                 avmplus::AvmLog("Projector files can't be used with -repl, -Dselftest, or program file arguments.\n");
+                 usage();
+@@ -1185,7 +1204,6 @@ namespace avmshell
+                 avmplus::AvmLog("A projector requires exactly one worker on one thread.\n");
+                 usage();
+             }
+-            settings.do_projector = 1;
+             return;
+         }
+ #endif
+diff -rupN avmplus-master.orig/shell/avmshell.h avmplus-master/shell/avmshell.h
+--- avmplus-master.orig/shell/avmshell.h	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/shell/avmshell.h	2014-10-11 22:09:36.000000000 +0400
+@@ -92,6 +92,9 @@ namespace avmshell
+ #include "DictionaryGlue.h"
+ #include "SamplerScript.h"
+ #include "ShellCore.h"
++// AVM2 PATCH START
++#include "ShellPosixGlue.h"
++// AVM2 PATCH END
+ #include "ShellWorkerGlue.h"
+ #include "ShellWorkerDomainGlue.h"
+ 
+@@ -144,6 +147,10 @@ namespace avmshell
+         bool do_repl;
+         bool do_log;
+         bool do_projector;
++        bool projectorHasArgs;
++        int projectorContentLength;
++        int projectorArgsLength;
++        avmplus::ScriptBuffer *projectorScriptBuffer;
+         int numthreads;
+         int numworkers;
+         int repeats;
+@@ -171,6 +178,7 @@ namespace avmshell
+         friend class ShellIsolate;
+     public:
+         static int run(int argc, char *argv[]);
++        static void parseCommandLine(int argc, char* argv[], ShellSettings& settings);
+ 
+     private:
+ #ifdef VMCFG_WORKERTHREADS
+diff -rupN avmplus-master.orig/shell/avmshellUnix.cpp avmplus-master/shell/avmshellUnix.cpp
+--- avmplus-master.orig/shell/avmshellUnix.cpp	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/shell/avmshellUnix.cpp	2014-10-11 22:09:36.000000000 +0400
+@@ -13,6 +13,9 @@
+ #include <unistd.h>
+ 
+ #include <sys/resource.h>
++#ifdef __CYGWIN__
++#include <fenv.h> // need to set float precision explicitly on cygwin
++#endif
+ 
+ namespace avmshell
+ {
+@@ -76,6 +79,9 @@ int main(int argc, char *argv[])
+     avmshell::UnixPlatform platformInstance(&dummy);
+     gPlatformHandle = &platformInstance;
+ 
++#ifdef __CYGWIN__
++    fesetprec(FE_DOUBLEPREC);
++#endif
+     int code = avmshell::Shell::run(argc, argv);
+     if (code == avmshell::OUT_OF_MEMORY) {
+         // Fascistic warnings settings for Linux64 require the value to be
+diff -rupN avmplus-master.orig/shell/manifest.mk avmplus-master/shell/manifest.mk
+--- avmplus-master.orig/shell/manifest.mk	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/shell/manifest.mk	2014-10-11 22:09:36.000000000 +0400
+@@ -34,6 +34,7 @@ shell_CXXSRCS := $(shell_CXXSRCS) \
+   $(curdir)/../extensions/Selftest.cpp \
+   $(curdir)/../extensions/SelftestInit.cpp \
+   $(curdir)/../extensions/SelftestExec.cpp \
++  $(curdir)/ShellPosixGlue.cpp \
+   $(curdir)/ShellWorkerGlue.cpp \
+   $(curdir)/ShellWorkerDomainGlue.cpp \
+   $(NULL)
+diff -rupN avmplus-master.orig/shell/shell_toplevel.py avmplus-master/shell/shell_toplevel.py
+--- avmplus-master.orig/shell/shell_toplevel.py	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/shell/shell_toplevel.py	2014-10-11 22:09:36.000000000 +0400
+@@ -43,7 +43,7 @@ if warn_notwriteable('../generated/shell
+     sys.exit(0) # exit 0 so build will continue
+ 
+ # compile builtins
+-os.system(asc+" -import ../generated/builtin.abc -builtin "+configs+" -apiversioning -out shell_toplevel shell_toplevel.as Domain.as ../extensions/Sampler.as ../extensions/Trace.as Endian.as Worker.as WorkerDomain.as")
++os.system(asc+" -import ../generated/builtin.abc -builtin "+configs+" -apiversioning -out shell_toplevel shell_toplevel.as Domain.as IKernel.as ShellPosix.as ../extensions/Sampler.as ../extensions/Trace.as Endian.as Worker.as WorkerDomain.as")
+ 
+ rm("shell_toplevel.h")
+ rm("shell_toplevel.cpp")
+Binary files avmplus-master.orig/utils/asc.jar and avmplus-master/utils/asc.jar differ
+diff -rupN avmplus-master.orig/utils/projectormake.as avmplus-master/utils/projectormake.as
+--- avmplus-master.orig/utils/projectormake.as	1970-01-01 03:00:00.000000000 +0300
++++ avmplus-master/utils/projectormake.as	2014-10-11 22:09:36.000000000 +0400
+@@ -0,0 +1,130 @@
++/* -*- mode: java -*- */
++/* ***** BEGIN LICENSE BLOCK *****
++ * Version: MPL 1.1/GPL 2.0/LGPL 2.1
++ *
++ * The contents of this file are subject to the Mozilla Public License Version
++ * 1.1 (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ * http://www.mozilla.org/MPL/
++ *
++ * Software distributed under the License is distributed on an "AS IS" basis,
++ * WITHOUT WARRANTY OF ANY KIND, either express or implied. See the License
++ * for the specific language governing rights and limitations under the
++ * License.
++ *
++ * The Original Code is [Open Source Virtual Machine.].
++ *
++ * The Initial Developer of the Original Code is
++ * Adobe System Incorporated.
++ * Portions created by the Initial Developer are Copyright (C) 2011
++ * the Initial Developer. All Rights Reserved.
++ *
++ * Contributor(s):
++ *   Adobe AS3 Team
++ *
++ * Alternatively, the contents of this file may be used under the terms of
++ * either the GNU General Public License Version 2 or later (the "GPL"), or
++ * the GNU Lesser General Public License Version 2.1 or later (the "LGPL"),
++ * in which case the provisions of the GPL or the LGPL are applicable instead
++ * of those above. If you wish to allow use of your version of this file only
++ * under the terms of either the GPL or the LGPL, and not to allow others to
++ * use your version of this file under the terms of the MPL, indicate your
++ * decision by deleting the provisions above and replace them with the notice
++ * and other provisions required by the GPL or the LGPL. If you do not delete
++ * the provisions above, a recipient may use your version of this file under
++ * the terms of any one of the MPL, the GPL or the LGPL.
++ *
++ * ***** END LICENSE BLOCK ***** */
++
++/* Utility to make an avmshell projector from an ABC/SWF file.
++ *
++ * Usage:
++ *
++ *   projectormake [-o filename] avmshell abc/swf [-- vmargs]
++ *
++ *   -o filename    defines the name of the output file
++ *
++ * By default the name of the output file is the name of the abc/swf
++ * file with ".abc" or ".swf" removed.
++ */
++
++package projectormake
++{
++    import avmplus.*;
++    import flash.utils.*;
++
++    var input_names = []
++    var output_name = null
++    var vmargs = null
++
++    var i=0, j;
++    var argc=System.argv.length;
++    var argv=System.argv;
++    var s;
++    while (i < argc) {
++        s = argv[i];
++        if (s == "-o") {
++            if (output_name != null || i+1 == argc)
++            usage();
++            output_name = argv[i+1];
++            i += 2;
++        }
++        else if (s == "--") {
++            vmargs = argv.slice(i+1)
++            break
++        }
++        else if (s.charAt(0) == "-") {
++            usage();
++        }
++        else {
++            input_names.push(s);
++            i++;
++        }
++    }
++
++    if (input_names.length != 2)
++        usage();
++
++    if (output_name == null) {
++        output_name = input_names[1];
++        output_name = output_name.replace(/\.abc$/, "");
++        output_name = output_name.replace(/\.swf$/, "");
++    }
++
++    var result = new ByteArray()
++    result.endian = "littleEndian"
++    result.writeBytes(File.readByteArray(input_names[0]))
++
++    var content = File.readByteArray(input_names[1])
++    result.writeBytes(content)
++    
++    if(vmargs != null) {
++        var vmargslength = result.position
++        for each(var vmarg in vmargs) {
++            result.writeUTFBytes(vmarg)
++            result.writeByte(0x0)
++        }
++        vmargslength = result.position - vmargslength
++    }
++
++    result.writeByte(0x56);
++    result.writeByte(0x34);
++    result.writeByte(0x12);
++    result.writeByte(0xFA);
++    result.writeUnsignedInt(content.length);
++    result.writeUnsignedInt(vmargs == null ? int.MAX_VALUE : vmargslength);
++    File.writeByteArray(output_name, result);
++    
++    if(vmargs == null) {
++        print("content length: "+content.length)
++    } else {
++        print("content length: "+content.length+", args length: "+vmargslength+", argc: " + vmargs.length)
++    }
++
++    System.exit(0);
++
++    function usage() {
++        print("Usage: avmshell projectormake.abc -- [-o filename]  avmshell abc/swf [-- vmargs]");
++        System.exit(1);
++    }
++}
+\ No newline at end of file
+diff -rupN avmplus-master.orig/vprof/vprof.cpp avmplus-master/vprof/vprof.cpp
+--- avmplus-master.orig/vprof/vprof.cpp	2013-12-03 04:04:04.000000000 +0400
++++ avmplus-master/vprof/vprof.cpp	2014-10-11 22:09:36.000000000 +0400
+@@ -10,6 +10,7 @@
+ 
+ #ifdef WIN32
+ #include "windows.h"
++#elif defined(__CYGWIN__)
+ #else
+ #define __cdecl
+ #include <stdarg.h>

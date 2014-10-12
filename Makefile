@@ -28,6 +28,13 @@ $?DEPENDENCY_DEJAGNU=dejagnu-1.5
 # Dependency Compression
 $?DEPENDENCY_ZLIB=zlib-1.2.5
 
+
+$?SRC_PACKAGES=$(DEPENDENCY_BMAKE) \
+			$(DEPENDENCY_CMAKE) $(DEPENDENCY_DEJAGNU) \
+			$(DEPENDENCY_GDB) $(DEPENDENCY_MAKE) \
+			$(DEPENDENCY_SWIG) $(DEPENDENCY_AVMPLUS) \
+			$(DEPENDENCY_ZLIB)
+
 # ====================================================================================
 # HOST PLATFORM OPTIONS
 # ====================================================================================
@@ -323,24 +330,49 @@ clean:
 	@cd samples && $(MAKE) -s clean
 	@echo "Done."
 
-# Install packaged dependency libraries
-unpack_libs:
-	tar xf packages/$(DEPENDENCY_BMAKE).tar.gz
-	tar xf packages/$(DEPENDENCY_CMAKE).tar.gz
-	tar xf packages/$(DEPENDENCY_DEJAGNU).tar.gz
-	tar xf packages/$(DEPENDENCY_GDB).tar.gz
-	tar xf packages/$(DEPENDENCY_MAKE).tar.gz
-	tar xf packages/$(DEPENDENCY_SWIG).tar.gz
+
+%.unpack:
+	tar xf packages/$*.tar.gz
+
+$(DEPENDENCY_AVMPLUS).unpack:
 	unzip -q -u packages/$(DEPENDENCY_AVMPLUS).zip
-	tar xf packages/$(DEPENDENCY_ZLIB).tar.gz
+
+%.clean:
+	rm -rf $*
+
+%.patch:
+	cd $* && patch -p1 < ../patches/$*.patch
+
+# Install packaged dependency libraries
+unpack_libs: clean_libs
+	# unpack source libs
+	@for target in $(SRC_PACKAGES) ; do \
+		$(MAKE) $$target.unpack ; \
+	done 
 
 patch_libs: unpack_libs
 	# apply patches
-	cp -r ./patches/$(DEPENDENCY_DEJAGNU) .
-	cp -r ./patches/$(DEPENDENCY_GDB) .
-	cp -r ./patches/$(DEPENDENCY_SWIG) .
-	cp -r ./patches/$(DEPENDENCY_ZLIB) .
-	cp -r ./patches/$(DEPENDENCY_AVMPLUS) .
+	@for target in $(SRC_PACKAGES) ; do \
+		$(MAKE) $$target.patch ; \
+	done 
+	# binary patches
+	cp ./tools/asc.jar  ./$(DEPENDENCY_AVMPLUS)/utils/asc.jar
+
+
+prepare_for_patches: clean patches_clean unpack_libs 
+	@for target in $(SRC_PACKAGES) ; do \
+		mv $$target $$target.orig ; \
+	done 
+
+patches_clean:
+	@for target in $(SRC_PACKAGES) ; do \
+		rm -rf $$target.orig ; \
+	done 
+
+patches:
+	@for target in $(SRC_PACKAGES) ; do \
+		echo "patch -rupN $$target.orig/ $$target/ > patches/$$target.patch" ; \
+	done 
 
 install_libs: unpack_libs patch_libs
 	@echo "sources ready"
@@ -348,13 +380,10 @@ install_libs: unpack_libs patch_libs
 
 # Clear depdendency libraries
 clean_libs:
-	rm -rf $(DEPENDENCY_BMAKE)
-	rm -rf $(DEPENDENCY_CMAKE)
-	rm -rf $(DEPENDENCY_GDB)
-	rm -rf $(DEPENDENCY_MAKE)
-	rm -rf $(DEPENDENCY_SWIG)
-	rm -rf $(DEPENDENCY_ZLIB)
-	rm -rf $(DEPENDENCY_AVMPLUS)
+	#clean libs
+	@for target in $(SRC_PACKAGES) ; do \
+		$(MAKE) $$target.clean; \
+	done 
 
 # ====================================================================================
 # BASE
@@ -1385,4 +1414,4 @@ else
 	rm -f $(BUILDROOT)/$(SDKNAME)-tmp.dmg
 endif
 
-.PHONY: bmake posix binutils docs gcc samples
+.PHONY: bmake posix binutils docs gcc samples patches
